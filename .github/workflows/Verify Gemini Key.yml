@@ -1,0 +1,116 @@
+name: Verify Gemini Key
+
+on:
+  schedule:
+    # 北京时间每天 16:00 Gemini Key 刷新额度
+    - cron: '10 0 * * *'
+    - cron: '10 8 * * *'  
+    - cron: '10 16 * * *' 
+  workflow_dispatch:
+
+jobs:
+  Verify-Flash:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 迁出代码
+        uses: actions/checkout@v3
+
+      - name: 使用FLASH模型检测
+        run: |
+          wget https://github.com/DeepSaek/Repo/raw/refs/heads/main/Verify%20Gemini%20Key/key.zip
+          unzip -P ${{ secrets.ZIPASS }} key.zip
+          wget https://github.com/DeepSaek/Repo/raw/refs/heads/main/Verify%20Gemini%20Key/checkerflash
+          chmod a+x checkerflash
+          ./checkerflash -i gemini.txt
+
+      - name: 处理结果
+        run: |
+          TS=$(date +%s)
+          echo $(TZ="Asia/Shanghai" date -d "@$TS" "+%Y%m%d%H%M%S") > time.txt
+          echo $(TZ="Asia/Shanghai" date -d "@$TS" "+%Y-%m-%d %H:%M:%S") > new_time.txt
+          mv freekey.txt freekey-$(cat time.txt).txt
+          mv paidkey.txt paidkey-$(cat time.txt).txt
+          echo "FREE_COUNT=$(wc -l < freekey-$(cat time.txt).txt)" >> $GITHUB_ENV
+          echo "PAID_COUNT=$(wc -l < paidkey-$(cat time.txt).txt)" >> $GITHUB_ENV
+          echo "MODEL_FULL_NAME=Gemini 2.5 Flash" >> $GITHUB_ENV
+
+      - name: 发送结果
+        run: |
+          FREE_FILE="freekey-$(cat time.txt).txt"
+          PAID_FILE="paidkey-$(cat time.txt).txt"
+          if [ ! -s "$FREE_FILE" ]; then
+            echo "此类别无有效的密钥。" > "$FREE_FILE"
+          fi
+          if [ ! -s "$PAID_FILE" ]; then
+            echo "此类别无有效的密钥。" > "$PAID_FILE"
+          fi
+          COMPLETION_TIME=$(cat new_time.txt)
+          curl -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMediaGroup" \
+            -F chat_id="${{ secrets.TELEGRAM_TO }}" \
+            -F media='[
+                {
+                    "type": "document",
+                    "media": "attach://file1"
+                },
+                {
+                    "type": "document",
+                    "media": "attach://file2",
+                    "caption": "<b>🚀 Gemini密钥验证完成</b>\n\n<b>测试模型:</b> ${{ env.MODEL_FULL_NAME }}\n<b>免费密钥:</b> ${{ env.FREE_COUNT }} 个\n<b>付费密钥:</b> ${{ env.PAID_COUNT }} 个\n\n<b>完成时间:</b> '"$COMPLETION_TIME"'",
+                    "parse_mode": "HTML"
+                }
+            ]' \
+            -F file1=@"$FREE_FILE" \
+            -F file2=@"$PAID_FILE"
+
+  Verify-Pro:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 迁出代码
+        uses: actions/checkout@v3
+
+      - name: 使用PRO模型检测
+        run: |
+          wget https://github.com/DeepSaek/Repo/raw/refs/heads/main/Verify%20Gemini%20Key/key.zip
+          unzip -P ${{ secrets.ZIPASS }} key.zip
+          wget https://github.com/DeepSaek/Repo/raw/refs/heads/main/Verify%20Gemini%20Key/checkerpro
+          chmod a+x checkerpro
+          ./checkerpro -i gemini.txt -r 2
+
+      - name: 处理结果
+        run: |
+          TS=$(date +%s)
+          echo $(TZ="Asia/Shanghai" date -d "@$TS" "+%Y%m%d%H%M%S") > time.txt
+          echo $(TZ="Asia/Shanghai" date -d "@$TS" "+%Y-%m-%d %H:%M:%S") > new_time.txt
+          mv freekey.txt freekey-$(cat time.txt).txt
+          mv paidkey.txt paidkey-$(cat time.txt).txt
+          echo "FREE_COUNT=$(wc -l < freekey-$(cat time.txt).txt)" >> $GITHUB_ENV
+          echo "PAID_COUNT=$(wc -l < paidkey-$(cat time.txt).txt)" >> $GITHUB_ENV
+          echo "MODEL_FULL_NAME=Gemini 2.5 Pro" >> $GITHUB_ENV
+
+      - name: 发送结果
+        run: |
+          FREE_FILE="freekey-$(cat time.txt).txt"
+          PAID_FILE="paidkey-$(cat time.txt).txt"
+          if [ ! -s "$FREE_FILE" ]; then
+            echo "此类别无有效的密钥。" > "$FREE_FILE"
+          fi
+          if [ ! -s "$PAID_FILE" ]; then
+            echo "此类别无有效的密钥。" > "$PAID_FILE"
+          fi
+          COMPLETION_TIME=$(cat new_time.txt)
+          curl -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMediaGroup" \
+            -F chat_id="${{ secrets.TELEGRAM_TO }}" \
+            -F media='[
+                {
+                    "type": "document",
+                    "media": "attach://file1"
+                },
+                {
+                    "type": "document",
+                    "media": "attach://file2",
+                    "caption": "<b>🚀 Gemini密钥验证完成</b>\n\n<b>测试模型:</b> ${{ env.MODEL_FULL_NAME }}\n<b>免费密钥:</b> ${{ env.FREE_COUNT }} 个\n<b>付费密钥:</b> ${{ env.PAID_COUNT }} 个\n\n<b>完成时间:</b> '"$COMPLETION_TIME"'",
+                    "parse_mode": "HTML"
+                }
+            ]' \
+            -F file1=@"$FREE_FILE" \
+            -F file2=@"$PAID_FILE"

@@ -1,0 +1,119 @@
+name: Deploy 3X-UI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  Deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 迁出代码
+        uses: actions/checkout@v3
+        
+
+      - name: 检查服务器配置
+        id: check_server
+        run: |
+          echo -e "已知CPU型号(性能降序): 7763，8370C，8272CL，8171M，E5-2673\n"
+          echo "--------------------------CPU信息--------------------------"
+          echo "CPU物理数量: $(cat /proc/cpuinfo | grep 'physical id' | sort | uniq | wc -l)"
+          echo "CPU核心数量: $(nproc)"
+          echo -e "CPU型号信息:$(cat /proc/cpuinfo | grep -m1 name | awk -F: '{print $2}')\n"
+          echo "--------------------------内存信息--------------------------"
+          echo "已安装内存详细信息:"
+          echo -e "$(sudo lshw -short -C memory | grep GiB)\n"
+          echo "--------------------------硬盘信息--------------------------"
+          echo "硬盘数量: $(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
+          echo "--------------------------网络信息--------------------------"
+          curl -s -4 ipinfo.io > raw_net_info
+          cat raw_net_info | jq -r '
+            "IP地址           \(.ip)\n" +
+            "所在城市         \(.city)\n" +
+            "所在区域         \(.region)\n" +
+            "国家             \(.country)\n" +
+            "地理位置         \(.loc)\n" +
+            "组织             \(.org)\n" +
+            "邮政编码         \(.postal)\n" +
+            "所在时区         \(.timezone)\n"'
+
+          echo "public_ip=$(cat raw_net_info | jq -r '.ip')" >> $GITHUB_OUTPUT
+          echo "city=$(cat raw_net_info | jq -r '.city')" >> $GITHUB_OUTPUT
+          echo "region=$(cat raw_net_info | jq -r '.region')" >> $GITHUB_OUTPUT
+          echo "country=$(cat raw_net_info | jq -r '.country')" >> $GITHUB_OUTPUT
+          echo "loc=$(cat raw_net_info | jq -r '.loc')" >> $GITHUB_OUTPUT
+          echo "org=$(cat raw_net_info | jq -r '.org')" >> $GITHUB_OUTPUT
+          echo "postal=$(cat raw_net_info | jq -r '.postal')" >> $GITHUB_OUTPUT
+          echo "timezone=$(cat raw_net_info | jq -r '.timezone')" >> $GITHUB_OUTPUT
+          
+      - name: 加入Tailscale私有网络
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:githubactions
+          version: latest
+
+      - name: 查看IP地址
+        id: get_local_ip
+        run: |
+          ip a
+          LOCAL_IP=$(ip -o -4 addr list | awk '/100\./ {print $4}' | cut -d/ -f1)
+          echo "提取到本地 IP: ${LOCAL_IP}"
+          echo "local_ip=${LOCAL_IP}" >> $GITHUB_OUTPUT
+
+      - name: 开启BBR
+        run: |
+          sudo modprobe tcp_bbr
+          sudo echo "tcp_bbr" | sudo tee --append /etc/modules-load.d/modules.conf
+          sudo echo "net.core.default_qdisc=fq" | sudo tee --append /etc/sysctl.conf
+          sudo echo "net.ipv4.tcp_congestion_control=bbr" | sudo tee --append /etc/sysctl.conf
+          sudo sysctl -p
+          sudo sysctl net.ipv4.tcp_available_congestion_control
+          sudo sysctl net.ipv4.tcp_congestion_control
+
+      - name: 安装3X-UI
+        run: |
+          git clone https://github.com/MHSanaei/3x-ui.git
+          mkdir 3x-ui/db
+          7z x -p${{ secrets.ZIPASS }} DB/DB1 -o3x-ui/db
+          cd 3x-ui
+          docker compose up -d
+          
+
+      - name: 发送通知
+        run: |
+          # 获取当前北京时间（UTC+8）
+          CURRENT_TIME=$(date -u +"%Y-%m-%d %H:%M:%S" -d "+8 hours")
+
+          MESSAGE=$(cat <<EOF
+          <b>🚀 3X-UI 节点部署完成 🎉</b>
+          
+          🖥️ <b>公网 IP:</b> <code>${{ steps.check_server.outputs.public_ip }}</code>  
+          🏠 <b>本地 IP:</b> <code>${{ steps.get_local_ip.outputs.local_ip }}</code>  
+          🏙️ <b>城市:</b> <code>${{ steps.check_server.outputs.city }}</code>  
+          🌍 <b>区域:</b> <code>${{ steps.check_server.outputs.region }}</code>  
+          📍 <b>地理位置:</b> <code>${{ steps.check_server.outputs.loc }}</code>  
+          🏢 <b>组织:</b> <code>${{ steps.check_server.outputs.org }}</code>  
+          📮 <b>邮政编码:</b> <code>${{ steps.check_server.outputs.postal }}</code>  
+          ⏰ <b>时区:</b> <code>${{ steps.check_server.outputs.timezone }}</code>  
+          
+          🔗 <b>WEB 管理地址:</b> <code>http://${{ steps.get_local_ip.outputs.local_ip }}:2053</code>  
+          👤 <b>用户名:</b> <code>3a219e0b79</code>  
+          🔑 <b>密码:</b> <code>fe1084c390</code>  
+          
+          📌 <b>节点连接信息:</b>  
+          <code>ss://YWVzLTEyOC1nY206eGxac2NueFVwSUhxb2R0WkVTYUt5c2orSzdoQzhUTkV2bzYxRmc4M3luUT0@${{ steps.get_local_ip.outputs.local_ip }}:43926?type=tcp#SS</code>  
+          
+          🕒 <b>当前时间:</b> <code>$CURRENT_TIME</code>  
+          EOF
+          )
+
+          MESSAGE=$(echo "$MESSAGE" | jq -sRr @uri)
+
+          curl -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+                -d "chat_id=${{ secrets.TELEGRAM_TO }}" \
+                -d "parse_mode=HTML" \
+                -d "text=$MESSAGE"
+  
+      - name: 启动SSH终端
+        uses: mxschmitt/action-tmate@v3

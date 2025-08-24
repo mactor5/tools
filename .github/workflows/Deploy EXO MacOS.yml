@@ -1,0 +1,53 @@
+name: Deploy EXO MacOS
+on: 
+  workflow_dispatch:
+
+jobs:
+  Deploy:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        # instance: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] 
+        instance: [0, 1, 2, 3, 4, 5] 
+    env:
+      EXO_HOME: ${{ github.workspace }}/models
+
+    steps:
+    - name: 迁出代码
+      uses: actions/checkout@v3
+
+
+    - name: 加入Tailscale私有网络
+      run: |
+        brew install tailscale --formula
+        sudo tailscaled install-system-daemon
+        tailscale up --auth-key='${{ secrets.TS_OAUTH_SECRET }}?ephemeral=true&preauthorized=true' --advertise-tags=tag:githubactions
+
+
+    - name: 部署EXO
+      run: |
+        echo $EXO_HOME
+        git clone https://github.com/exo-explore/exo.git
+        cd exo
+        pip install -e .
+        source install.sh
+        mkdir ${{ github.workspace }}/models
+        echo 启动EXO
+        exo --discovery-module tailscale --tailscale-api-key ${{ secrets.TS_API_KEY }} --tailnet-name ${{ secrets.TS_NETNAME }} >/dev/null 2>&1 &
+
+        cat > ${{ github.workspace }}/restart.sh << 'EOF'
+        #!/bin/bash
+
+        # 查找包含 'exo' 的进程并终止
+        ps aux | grep 'exo' | grep -v grep | awk '{print $2}' | while read pid; do
+            echo "Killing process $pid"
+            kill -9 $pid
+        done
+
+        echo "All processes containing 'exo' have been terminated."
+        echo "Running EXO."
+        exo --discovery-module tailscale --tailscale-api-key ${{ secrets.TS_API_KEY }} --tailnet-name ${{ secrets.TS_NETNAME }}
+        EOF
+      
+    - name: 设置SSH终端
+      uses: mxschmitt/action-tmate@v3

@@ -1,0 +1,170 @@
+name: Deploy BililiveRecorder
+
+on:
+  workflow_dispatch:
+
+jobs:
+  Server:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 迁出代码
+        uses: actions/checkout@v3
+        
+      - name: 检查服务器配置
+        id: check_server
+        run: |
+          echo -e "已知CPU型号(性能降序): 7763，8370C，8272CL，8171M，E5-2673\n"
+          echo "--------------------------CPU信息--------------------------"
+          echo "CPU物理数量: $(cat /proc/cpuinfo | grep 'physical id' | sort | uniq | wc -l)"
+          echo "CPU核心数量: $(nproc)"
+          echo -e "CPU型号信息:$(cat /proc/cpuinfo | grep -m1 name | awk -F: '{print $2}')\n"
+          echo "--------------------------内存信息--------------------------"
+          echo "已安装内存详细信息:"
+          echo -e "$(sudo lshw -short -C memory | grep GiB)\n"
+          echo "--------------------------硬盘信息--------------------------"
+          echo "硬盘数量: $(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
+          echo "--------------------------网络信息--------------------------"
+          curl -s -4 ipinfo.io > raw_net_info
+          cat raw_net_info | jq -r '
+            "IP地址           \(.ip)\n" +
+            "所在城市         \(.city)\n" +
+            "所在区域         \(.region)\n" +
+            "国家             \(.country)\n" +
+            "地理位置         \(.loc)\n" +
+            "组织             \(.org)\n" +
+            "邮政编码         \(.postal)\n" +
+            "所在时区         \(.timezone)\n"' 
+
+          echo "public_ip=$(cat raw_net_info | jq -r '.ip')" >> $GITHUB_OUTPUT
+          echo "city=$(cat raw_net_info | jq -r '.city')" >> $GITHUB_OUTPUT
+          echo "region=$(cat raw_net_info | jq -r '.region')" >> $GITHUB_OUTPUT
+          echo "country=$(cat raw_net_info | jq -r '.country')" >> $GITHUB_OUTPUT
+          echo "loc=$(cat raw_net_info | jq -r '.loc')" >> $GITHUB_OUTPUT
+          echo "org=$(cat raw_net_info | jq -r '.org')" >> $GITHUB_OUTPUT
+          echo "postal=$(cat raw_net_info | jq -r '.postal')" >> $GITHUB_OUTPUT
+          echo "timezone=$(cat raw_net_info | jq -r '.timezone')" >> $GITHUB_OUTPUT
+
+      - name: 加入Tailscale私有网络
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:githubactions
+          version: latest
+
+      - name: 开启BBR加速
+        run: |
+          cat > bbr.sh << 'EOF'
+          enable_bbr() {
+              if grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf && grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf; then
+                  echo -e "BBR is already enabled!"
+                  return
+              fi
+
+              # Enable BBR
+              echo "net.core.default_qdisc=fq" | tee -a /etc/sysctl.conf
+              echo "net.ipv4.tcp_congestion_control=bbr" | tee -a /etc/sysctl.conf
+
+              # Apply changes
+              sysctl -p
+
+              # Verify that BBR is enabled
+              if [[ $(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}') == "bbr" ]]; then
+                  echo -e "BBR has been enabled successfully."
+              else
+                  echo -e "${red}Failed to enable BBR. Please check your system configuration."
+              fi
+          }
+
+          enable_bbr
+          EOF
+          sudo bash bbr.sh
+
+      - name: 查看IP地址
+        id: get_local_ip
+        run: |
+          ip a
+          LOCAL_IP=$(ip -o -4 addr list | awk '/100\./ {print $4}' | cut -d/ -f1)
+          echo "提取到本地 IP: ${LOCAL_IP}"
+          echo "local_ip=${LOCAL_IP}" >> $GITHUB_OUTPUT
+
+      - name: 设置环境
+        run: |
+          sudo apt update
+          mkdir upload
+          echo "上传文件目录: $(pwd)/upload"
+            
+      - name: 部署 BililiveRecorder
+        run: |
+          cat > ./upload/config.json << 'EOF'
+          {"version":3,"global":{"CuttingMode":{"HasValue":true,"Value":2},"CuttingNumber":{"HasValue":true,"Value":2000},"CuttingByTitle":{"HasValue":true,"Value":true},"RecordDanmaku":{"HasValue":true,"Value":true},"RecordDanmakuRaw":{"HasValue":true,"Value":true},"RecordDanmakuGift":{"HasValue":true,"Value":true},"SaveStreamCover":{"HasValue":true,"Value":true},"FileNameRecordTemplate":{"HasValue":true,"Value":"录制-{{ name }}-{{ \"now\" | time_zone: \"Asia/Shanghai\" | format_date: \"yyyyMMdd-HHmmss-fff\" }}-{{ title }}.flv"},"FlvProcessorSplitOnScriptTag":{"HasValue":true,"Value":true}},"rooms":[{"RoomId":{"HasValue":true,"Value":21669525},"AutoRecord":{"HasValue":true,"Value":true}}]}
+          EOF
+
+          cat > docker-compose.yml << 'EOF'
+          version: "3.8"
+          services:
+            recorder:
+              image: bililive/recorder:latest
+              restart: unless-stopped
+              volumes:
+                - type: bind
+                  source: ./upload # 在这里写宿主机保存录播的路径
+                  target: /rec
+              ports:
+                - "80:2356"
+                # 第一个 2356 是宿主机的端口，可以根据自己需求改动。
+                # 第二个 2356 是容器内的端口，不要修改。
+              environment:
+                - BREC_HTTP_BASIC_USER=
+                - BREC_HTTP_BASIC_PASS=
+                - UMASK=022
+                # # (高级参数，非必填)这个值用于控制镜像写出的文件权限，002为当前用户&当前用户组可读写，默认值022为当前用户可读写，其他用户只读
+                # - PUID=1000
+                # # (高级参数，非必填)这个值用于控制文件所有者，建议设置为宿主机的用户的UID或者和宿主机用户相同用户组的用户的UID
+                # - PGID=1000
+                # # (高级参数，非必填)这个值用于控制文件所有者所属的用户组，建议设置为宿主机的用户相同的用户组的GID
+                    
+          EOF
+          docker compose up -d
+
+      - name: 发送 Telegram 通知
+        run: |
+          # 获取当前时间（UTC+8 时区，北京时间）
+          current_time=$(date -u +"%Y-%m-%d %H:%M:%S" -d "8 hour")
+
+          # 构造 Telegram 消息
+          message=$(cat <<EOF
+          <b>🚀 BililiveRecorder 部署成功 🎉</b>
+
+          🖥️ <b>公网 IP:</b> <code>${{ steps.check_server.outputs.public_ip }}</code>  
+          🏠 <b>本地 IP:</b> <code>${{ steps.get_local_ip.outputs.local_ip }}</code>  
+          🏙️ <b>城市:</b> <code>${{ steps.check_server.outputs.city }}</code>  
+          🌍 <b>区域:</b> <code>${{ steps.check_server.outputs.region }}</code>  
+          🗺️ <b>国家:</b> <code>${{ steps.check_server.outputs.country }}</code>  
+          📍 <b>地理位置:</b> <code>${{ steps.check_server.outputs.loc }}</code>  
+          🏢 <b>组织:</b> <code>${{ steps.check_server.outputs.org }}</code>  
+          📮 <b>邮政编码:</b> <code>${{ steps.check_server.outputs.postal }}</code>  
+          ⏰ <b>时区:</b> <code>${{ steps.check_server.outputs.timezone }}</code>  
+
+          🕒 <b>当前时间:</b> <code>$current_time</code>  
+          EOF
+          )
+
+          # 进行 URL 编码
+          message=$(echo "$message" | jq -sRr @uri)
+
+          # 发送 Telegram 消息
+          curl -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+               -d "chat_id=${{ secrets.TELEGRAM_TO }}" \
+               -d "parse_mode=HTML" \
+               -d "text=$message"
+
+      - name: 启动SSH终端
+        uses: mxschmitt/action-tmate@v3
+
+      - name: 上传文件
+        uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: my-artifact
+          path: upload

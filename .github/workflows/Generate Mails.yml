@@ -1,0 +1,140 @@
+name: Generate Mails
+
+on:
+  workflow_dispatch:
+    inputs:
+      pre:
+        description: '邮箱前缀'
+        required: false
+      num:
+        description: '邮箱数量'
+        required: false
+
+jobs:
+  Server:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 迁出代码
+        uses: actions/checkout@v3
+        
+      - name: 检查服务器配置
+        id: check_server
+        run: |
+          echo -e "已知CPU型号(性能降序): 7763，8370C，8272CL，8171M，E5-2673\n"
+          echo "--------------------------CPU信息--------------------------"
+          echo "CPU物理数量: $(cat /proc/cpuinfo | grep 'physical id' | sort | uniq | wc -l)"
+          echo "CPU核心数量: $(nproc)"
+          echo -e "CPU型号信息:$(cat /proc/cpuinfo | grep -m1 name | awk -F: '{print $2}')\n"
+          echo "--------------------------内存信息--------------------------"
+          echo "已安装内存详细信息:"
+          echo -e "$(sudo lshw -short -C memory | grep GiB)\n"
+          echo "--------------------------硬盘信息--------------------------"
+          echo "硬盘数量: $(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
+          echo "--------------------------网络信息--------------------------"
+          curl -s -4 ipinfo.io > raw_net_info
+          cat raw_net_info | jq -r '
+            "IP地址           \(.ip)\n" +
+            "所在城市         \(.city)\n" +
+            "所在区域         \(.region)\n" +
+            "国家             \(.country)\n" +
+            "地理位置         \(.loc)\n" +
+            "组织             \(.org)\n" +
+            "邮政编码         \(.postal)\n" +
+            "所在时区         \(.timezone)\n"'
+
+      - name: 生成代码
+        id: generate_Code
+        run: |
+          cat > gen.py << 'EOF'
+          import requests
+          import argparse
+          import json
+          import random
+          import string
+
+          # 解析命令行参数
+          parser = argparse.ArgumentParser(description="生成临时邮箱")
+          parser.add_argument("-p", "--prefix", type=str, help="邮箱用户名前缀，不提供则随机生成", default="")
+          parser.add_argument("-c", "--count", type=int, help="生成邮箱数量，默认为5个", default=5)
+          args = parser.parse_args()
+
+          # 请求的 URL
+          url = "${{ secrets.EDU_API_URL }}"
+
+          # 设置请求头
+          headers = {
+            'Content-Type': 'application/json',
+            'X-API-Key': '${{ secrets.EDU_API_TOKEN }}' 
+          }
+
+          # 生成随机字符串函数
+          def generate_random_string(length=8):
+              return ''.join(random.choice(string.ascii_letters) for _ in range(length))
+
+          # 批量生成邮箱
+          for i in range(1, args.count + 1):
+              # 如果没有提供前缀，则生成随机8位字母
+              if not args.prefix:
+                  name = generate_random_string(8)
+              else:
+                  # 使用前缀加数字序号(从001开始)
+                  name = f"{args.prefix}{i:03d}"
+              
+              # 请求体数据
+              payload = {
+                "name": name,
+                "expiryTime": 0,
+                "domain": "${{ secrets.EDU_DOMAIN }}"
+              }
+              
+              try:
+                  # 发送 POST 请求
+                  response = requests.post(url, json=payload, headers=headers)
+                  
+                  # 检查请求是否成功
+                  response.raise_for_status()
+                  
+                  # 获取响应内容
+                  json_response = response.json()
+                  print(f"邮箱 {i}/{args.count} 生成成功: {json.dumps(json_response, indent=2, ensure_ascii=False)}")
+                  
+              except requests.exceptions.RequestException as e:
+                  print(f"生成邮箱 {name} 失败: {e}")
+
+          EOF
+
+          # 设置默认值
+          PREFIX="${{ github.event.inputs.pre }}"
+          COUNT="${{ github.event.inputs.num }}"
+          
+          # 检查并运行脚本
+          if [ -z "$PREFIX" ]; then
+            # 如果前缀为空，不传递-p参数
+            if [ -z "$COUNT" ]; then
+              # 如果数量也为空，使用默认值
+              python gen.py >> email.txt
+            else
+              # 只传递数量
+              python gen.py -c "$COUNT" >> email.txt
+            fi
+          else
+            # 前缀不为空
+            if [ -z "$COUNT" ]; then
+              # 如果数量为空，使用默认值
+              python gen.py -p "$PREFIX" >> email.txt
+            else
+              # 两个参数都传递
+              python gen.py -p "$PREFIX" -c "$COUNT" >> email.txt
+            fi
+          fi
+          
+          echo 生成成功
+
+      - name: 发送通知
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_TOKEN }}
+          message_file: email.txt
+
+        

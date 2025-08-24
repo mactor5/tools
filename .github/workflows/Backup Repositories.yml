@@ -1,0 +1,73 @@
+# 工作流名称
+name: Backup Repositories
+
+# 触发器：允许手动触发
+on:
+  workflow_dispatch:
+    inputs:
+      repository_url:
+        description: '仓库地址'
+        required: true
+        default: 'https://github.com/nginx/nginx'
+
+# 定义任务
+jobs:
+  Backup:
+    # 运行环境
+    runs-on: ubuntu-latest
+    
+    # 任务步骤
+    steps:
+      # 步骤 1: 从输入的 URL 中提取仓库名称，并生成时间戳和最终文件名
+      - name: Generate Backup Info
+        id: info
+        run: |
+          # 从 URL 中提取仓库名
+          REPO_NAME=$(basename ${{ github.event.inputs.repository_url }})
+          echo "REPO_NAME=${REPO_NAME}" >> $GITHUB_ENV
+
+          # 生成一个格式化的时间戳
+          TIMESTAMP=$(date +'%Y%m%d-%H%M')
+          echo "TIMESTAMP=${TIMESTAMP}" >> $GITHUB_ENV
+          
+          # 生成最终的压缩包文件名 (例如 nginx-20250817-1030.zip)
+          ZIP_FILENAME="${REPO_NAME}-${TIMESTAMP}.zip"
+          echo "ZIP_FILENAME=${ZIP_FILENAME}" >> $GITHUB_ENV
+          
+          echo "仓库名称: ${REPO_NAME}"
+          echo "备份文件名: ${ZIP_FILENAME}"
+
+      # 步骤 2: 下载仓库的 .zip 压缩包
+      - name: Download Repository Archive
+        run: |
+          # 构造两种可能的下载链接 (针对 main 和 master 分支)
+          DOWNLOAD_URL_MAIN="${{ github.event.inputs.repository_url }}/archive/refs/heads/main.zip"
+          DOWNLOAD_URL_MASTER="${{ github.event.inputs.repository_url }}/archive/refs/heads/master.zip"
+          
+          echo "尝试从 main 分支下载: ${DOWNLOAD_URL_MAIN}"
+          # 使用 wget 下载并直接保存为我们指定的文件名
+          # 如果从 main 下载失败 (wget 返回非0退出码), "||" 会执行后面的命令，尝试从 master 下载
+          wget -q --show-progress -O "${{ env.ZIP_FILENAME }}" "${DOWNLOAD_URL_MAIN}" || \
+          (echo "从 main 分支下载失败, 尝试 master 分支..." && wget -q --show-progress -O "${{ env.ZIP_FILENAME }}" "${DOWNLOAD_URL_MASTER}")
+
+          echo "下载完成, 文件已保存为: ${{ env.ZIP_FILENAME }}"
+
+      # 步骤 3: 将备份文件发送到 Telegram
+      - name: Send to Telegram
+        run: |
+          CAPTION=$(printf "🚀 备份完成\n🌐 仓库地址：${{ github.event.inputs.repository_url }}\n🔗 #手动备份")
+
+          curl -X POST "https://api.telegram.org/bot${{ secrets.FL_TELEGRAM_TOKEN }}/sendDocument" \
+               -F chat_id="${{ secrets.TELEGRAM_TO }}" \
+               -F document=@"${{ env.ZIP_FILENAME }}" \
+               -F caption="$CAPTION" \
+               -F parse_mode="HTML"
+
+      # 步骤 4: 将备份文件上传到 GitHub Actions 的 Artifacts
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # Artifacts 的名称
+          name: backup-${{ env.REPO_NAME }}
+          # 要上传的文件路径
+          path: ${{ env.ZIP_FILENAME }}

@@ -1,0 +1,132 @@
+name: Deploy Windows Server
+
+on:
+  workflow_dispatch:
+    inputs:
+      windows_server_version:
+        description: '部署 Windows Server 版本'
+        required: true
+        default: '2022'
+        type: choice
+        options:
+          - '2025'
+          - '2022'
+          - '2019'
+
+jobs:
+  Server:
+    runs-on: windows-${{ github.event.inputs.windows_server_version }}
+    steps:
+      - name: 迁出代码
+        uses: actions/checkout@v3
+
+      - name: 加入Tailscale私有网络
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:githubactions
+          version: latest
+
+      - name: 开启隐藏文件和后缀显示
+        shell: pwsh
+        run: |
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v Hidden /t REG_DWORD /d 1 /f
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v HideFileExt /t REG_DWORD /d 0 /f
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v LaunchTo /t REG_DWORD /d 2 /f
+          taskkill /f /im explorer.exe && start explorer.exe
+          reg load HKU\DefaultUser "C:\Users\Default\NTUSER.DAT"
+          reg add "HKU\DefaultUser\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v Hidden /t REG_DWORD /d 1 /f
+          reg add "HKU\DefaultUser\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v HideFileExt /t REG_DWORD /d 0 /f
+          reg add "HKU\DefaultUser\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v LaunchTo /t REG_DWORD /d 2 /f
+          reg unload HKU\DefaultUser
+
+      - name: 设置用户
+        shell: cmd
+        run: |
+          secedit /export /cfg c:\secpol.cfg
+          echo. >c:\out.txt
+          type c:\secpol.cfg | findstr -i complex >>c:\out.txt
+          powershell -command "(GC C:\secpol.cfg) -Replace \"PasswordComplexity = 1\",\"PasswordComplexity = 0\" | Out-File C:\secpol.cfg"
+          echo. >>c:\out.txt
+          type c:\secpol.cfg | findstr -i complex >>c:\out.txt
+          secedit /configure /db c:\windows\security\local.sdb /cfg c:\secpol.cfg /areas SECURITYPOLICY
+          del /q c:\secpol.cfg
+          type c:\out.txt
+          del /q c:\out.txt
+          del %windir%\security\logs\scesrv.log
+          net user %USERNAME% ${{ secrets.WINPASS }}
+          net user AD dd /add
+          net localgroup Administrators AD /add
+          mkdir upload
+
+      - name: 获取本地IP地址
+        shell: pwsh
+        run: |
+          (Get-NetIPAddress | Where-Object {$_.IPAddress -match '^100\.'}).IPAddress > local_ip.txt
+          cat local_ip.txt 
+
+      - name: 查看IP地址
+        shell: bash
+        id: get_local_ip
+        run: |
+          curl -s -4 ipinfo.io > raw_net_info
+          cat raw_net_info | jq -r '
+            "IP地址           \(.ip)\n" +
+            "所在城市         \(.city)\n" +
+            "所在区域         \(.region)\n" +
+            "国家             \(.country)\n" +
+            "地理位置         \(.loc)\n" +
+            "组织             \(.org)\n" +
+            "邮政编码         \(.postal)\n" +
+            "所在时区         \(.timezone)\n"'
+
+          echo "public_ip=$(cat raw_net_info | jq -r '.ip')" >> $GITHUB_OUTPUT
+          echo "city=$(cat raw_net_info | jq -r '.city')" >> $GITHUB_OUTPUT
+          echo "region=$(cat raw_net_info | jq -r '.region')" >> $GITHUB_OUTPUT
+          echo "country=$(cat raw_net_info | jq -r '.country')" >> $GITHUB_OUTPUT
+          echo "loc=$(cat raw_net_info | jq -r '.loc')" >> $GITHUB_OUTPUT
+          echo "org=$(cat raw_net_info | jq -r '.org')" >> $GITHUB_OUTPUT
+          echo "postal=$(cat raw_net_info | jq -r '.postal')" >> $GITHUB_OUTPUT
+          echo "timezone=$(cat raw_net_info | jq -r '.timezone')" >> $GITHUB_OUTPUT
+          echo "local_ip=$(cat local_ip.txt )" >> $GITHUB_OUTPUT
+
+      - name: 发送 Telegram 通知
+        shell: pwsh
+        run: |
+          # 获取当前时间（UTC+8 时区，北京时间）
+          $current_time = (Get-Date).ToUniversalTime().AddHours(8).ToString("yyyy-MM-dd HH:mm:ss")
+
+          $message = @"
+          <b>🚀 Windows Server ${{ github.event.inputs.windows_server_version }} 部署成功 🎉</b>
+
+          🖥️ <b>公网 IP:</b> <code>${{ steps.get_local_ip.outputs.public_ip }}</code>  
+          🏠 <b>本地 IP:</b> <code>${{ steps.get_local_ip.outputs.local_ip }}</code>  
+          🏙️ <b>城市:</b> <code>${{ steps.get_local_ip.outputs.city }}</code>  
+          🌍 <b>区域:</b> <code>${{ steps.get_local_ip.outputs.region }}</code>  
+          🗺️ <b>国家:</b> <code>${{ steps.get_local_ip.outputs.country }}</code>  
+          📍 <b>地理位置:</b> <code>${{ steps.get_local_ip.outputs.loc }}</code>  
+          🏢 <b>组织:</b> <code>${{ steps.get_local_ip.outputs.org }}</code>  
+          📮 <b>邮政编码:</b> <code>${{ steps.get_local_ip.outputs.postal }}</code>  
+          ⏰ <b>时区:</b> <code>${{ steps.get_local_ip.outputs.timezone }}</code>  
+
+          🕒 <b>当前时间:</b> <code>$current_time</code>  
+          "@
+
+          $message = [uri]::EscapeDataString($message)
+
+          curl.exe -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" `
+               -d "chat_id=${{ secrets.TELEGRAM_TO }}" `
+               -d "parse_mode=HTML" `
+               -d "text=$message"
+
+      - name: 启动SSH终端
+        uses: mxschmitt/action-tmate@v3
+
+      - name: 上传文件
+        uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: my-artifact
+          path: upload
+        
