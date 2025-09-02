@@ -1,10 +1,10 @@
 name: Verify Gemini Key
 
 on:
-  schedule:
+  # schedule:
     # 北京时间每天 16:00 Gemini Key 刷新额度
     # - cron: '10 0 * * *'
-    - cron: '10 8 * * *'  
+    # - cron: '10 8 * * *'  
     # - cron: '10 16 * * *' 
   workflow_dispatch:
 
@@ -167,4 +167,5 @@ jobs:
                 }
             ]' \
             -F file1=@"$FREE_FILE" \
+
             -F file2=@"$PAID_FILE"
